@@ -232,7 +232,7 @@ def process_acts(link, acts_page_link):
                 f"chunks ({BATCH_SIZE}-item batches)"
             )
             
-            return f"This PDF ID is: caseone-laws"
+            return f"This PDF ID is: caseone-acts"
 
     except Exception as e:
         logger.error(f"Error processing PDF: {e}")
