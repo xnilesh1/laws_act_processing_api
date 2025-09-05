@@ -127,12 +127,14 @@ async def create_law_processing_job(payload: LawPayload, _=ProtectedEndpoint):
 
 # --- 7. Main Execution Block ---
 
-# --- 7. Main Execution Block ---
-
 if __name__ == "__main__":
-    # Read the port from the environment variable, with a default for local development
-    port = int(os.environ.get("PORT", 8000))
+    # Get port from environment variable (Railway sets this automatically)
+    port = int(os.environ.get("PORT", 5000))
     
-    # Runs the application using Uvicorn, a fast ASGI server.
-    # The host '0.0.0.0' makes the server accessible on your local network.
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    if os.environ.get("ENVIRONMENT") == "production":
+        # Production: use waitress
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=port)
+    else:
+        # Development: use Flask's built-in server
+        app.run(debug=False, host="0.0.0.0", port=port)
