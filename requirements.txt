@@ -2,7 +2,6 @@ langchain
 langchain-google-genai
 langchain-pinecone
 langchain-community
-langchain-core
 fastapi
 uvicorn[standard]
 python-dotenv
