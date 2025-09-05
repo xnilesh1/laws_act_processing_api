@@ -16,6 +16,8 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
+from dotenv import load_dotenv
+load_dotenv() # Load environment variables from .env file
 
 
 # Configure module-level logger
