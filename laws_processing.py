@@ -215,7 +215,7 @@ def process_laws(link):
             
             # Parameters to pass to the subprocess
             params = {
-                'name_space': "caseone-laws",
+                'name_space': "caseone-laws-2",
                 'index_name': index_name,
                 'api_key': api_key,
                 'original_filename': original_filename,
