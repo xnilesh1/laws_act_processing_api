@@ -17,6 +17,8 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
+from dotenv import load_dotenv
+load_dotenv() # Load environment variables from .env file
 
 
 # Configure module-level logger
@@ -132,7 +134,6 @@ def pdf_processor_subprocess(pdf_path: str, params: Dict, result_file: str):
         # Extract parameters
         name_space = params['name_space']
         index_name = params['index_name']
-        api_key = params['api_key']
         original_filename = params.get('original_filename')
         
         # Set up embeddings and vector store
@@ -141,7 +142,7 @@ def pdf_processor_subprocess(pdf_path: str, params: Dict, result_file: str):
             google_api_key=os.environ["GOOGLE_API_KEY"],
         )
         
-        pc = Pinecone(api_key=api_key)
+        pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
         index = pc.Index(index_name)
         
         vector_store = PineconeVectorStore(
@@ -217,7 +218,6 @@ def process_laws(link):
             params = {
                 'name_space': "caseone-laws-2",
                 'index_name': index_name,
-                'api_key': api_key,
                 'original_filename': original_filename,
             }
             
