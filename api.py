@@ -130,7 +130,7 @@ class LawResource(Resource):
 
 if __name__ == "__main__":
     # Read the port from the environment variable, with a default for local development
-    port = int(os.environ.get("PORT", 5000))
+
     # Note: Flask's development server is not for production.
     # Use a production-ready WSGI server like Gunicorn or Waitress.
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)
