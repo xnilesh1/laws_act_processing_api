@@ -1,140 +1,136 @@
 import logging
 import os
-from typing import Annotated
+from functools import wraps
 
-import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Header
-from pydantic import BaseModel, Field
+from flask import Flask, request
+from flask_restx import Api, Resource, reqparse, fields
+from pydantic import Field
 from pydantic_settings import BaseSettings
+from werkzeug.exceptions import Unauthorized, InternalServerError
 
-# Import your processing functions from the other files
+# Import your existing processing functions
 from acts import process_acts
 from laws_processing import process_laws
 
 # --- 1. Basic Setup ---
 
-# Load environment variables from a .env file
+# Load environment variables
 load_dotenv()
 
-# Configure basic logging to see requests and errors in the console
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-# --- 2. Centralized Configuration ---
+# --- 2. Centralized Configuration (Same as before) ---
 
-# Use Pydantic's BaseSettings to manage configuration in one place
-# This class will automatically read variables from the environment
 class Settings(BaseSettings):
     """Manages application-wide settings."""
     api_password: str = Field(alias="API_PASSWORD")
 
     class Config:
-        # Allows the model to read from a .env file if load_dotenv() is used
         env_file = ".env"
         extra = "ignore"
 
-# Create a single instance of the settings
 settings = Settings()
 
 
-# --- 3. FastAPI Application Initialization ---
+# --- 3. Flask & Flask-RESTX Application Initialization ---
 
-app = FastAPI(
-    title="PDF Processing API",
-    description="An API to process Act and Law PDF documents from URLs and store them as vector embeddings.",
-    version="1.0.0",
-)
+app = Flask(__name__)
+api = Api(app,
+          version='1.0',
+          title='PDF Processing API',
+          description='An API to process Act and Law PDF documents from URLs and store them as vector embeddings.',
+          doc='/')  # Serve Swagger UI at the root URL
+
+# Define a namespace for the API endpoints
+ns = api.namespace('processing', description='PDF Processing operations')
 
 
 # --- 4. Security / Authentication ---
 
-async def verify_password(x_api_password: Annotated[str, Header()]):
-    """
-    Dependency to verify the `x-api-password` header against the server's environment variable.
-    """
-    if not settings.api_password:
-        logger.error("API_PASSWORD environment variable is not set on the server.")
-        raise HTTPException(status_code=500, detail="Server configuration error.")
-    
-    if x_api_password != settings.api_password:
-        logger.warning("Invalid API password attempt.")
-        raise HTTPException(status_code=401, detail="Invalid or missing API Password")
-
-# A common dependency to apply password verification to all endpoints
-ProtectedEndpoint = Depends(verify_password)
+def require_api_key(f):
+    """Decorator to protect endpoints with an API key."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        api_key = request.headers.get('x-api-password')
+        if not settings.api_password:
+            logger.error("API_PASSWORD environment variable is not set on the server.")
+            raise InternalServerError("Server configuration error.")
+        if not api_key or api_key != settings.api_password:
+            logger.warning("Invalid API password attempt.")
+            raise Unauthorized("Invalid or missing API Password")
+        return f(*args, **kwargs)
+    return decorated
 
 
 # --- 5. API Request and Response Models ---
 
-class ActPayload(BaseModel):
-    """Request body for processing an 'Act' document."""
-    pdf_link: str = Field(..., description="A direct public URL to the Act PDF file.", example="https://www.indiacode.nic.in/bitstream/123456789/15639/1/a1872-09.pdf")
-    acts_page_link: str = Field(..., description="The source URL of the page where the PDF was found.", example="https://www.indiacode.nic.in/handle/123456789/15639")
+# Request parsers for input validation
+act_parser = reqparse.RequestParser()
+act_parser.add_argument('pdf_link', type=str, required=True, help='A direct public URL to the Act PDF file.', location='json')
+act_parser.add_argument('acts_page_link', type=str, required=True, help='The source URL of the page where the PDF was found.', location='json')
 
-class LawPayload(BaseModel):
-    """Request body for processing a 'Law' document."""
-    pdf_link: str = Field(..., description="A direct public URL to the Law PDF file.", example="https://www.un.org/en/genocideprevention/documents/atrocity-crimes/Doc.1_Convention%20on%20the%20Prevention%20and%20Punishment%20of%20the%20Crime%20of%20Genocide.pdf")
+law_parser = reqparse.RequestParser()
+law_parser.add_argument('pdf_link', type=str, required=True, help='A direct public URL to the Law PDF file.', location='json')
 
-class ProcessingResponse(BaseModel):
-    """Standard success response model for processing jobs."""
-    message: str = Field(..., example="PDF processed successfully.")
-    details: str = Field(..., example="This PDF ID is: caseone-acts")
+# Response model for consistent output structure
+processing_response_model = api.model('ProcessingResponse', {
+    'message': fields.String(required=True, description='Status message of the processing job.'),
+    'details': fields.String(required=True, description='Details returned from the processing job.')
+})
 
 
 # --- 6. API Endpoints ---
 
-@app.post(
-    "/act",
-    response_model=ProcessingResponse,
-    summary="Process an Act PDF",
-    description="Accepts a URL to an Act PDF, processes it, and upserts the vectorized content to Pinecone."
-)
-async def create_act_processing_job(payload: ActPayload, _=ProtectedEndpoint):
-    """
-    Processes an Act PDF synchronously. The function will wait until processing is complete.
-    """
-    try:
-        logger.info(f"Starting processing for Act PDF: {payload.pdf_link}")
-        result = process_acts(payload.pdf_link, payload.acts_page_link)
-        logger.info(f"Successfully processed Act PDF: {payload.pdf_link}")
-        return {"message": "Act PDF processed successfully.", "details": result}
-    except Exception as e:
-        logger.error(f"Error processing Act PDF {payload.pdf_link}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An error occurred during processing: {str(e)}")
+@ns.route('/act')
+class ActResource(Resource):
+    @ns.doc('process_act', description="Accepts a URL to an Act PDF, processes it, and upserts the vectorized content.")
+    @ns.expect(act_parser)
+    @ns.marshal_with(processing_response_model)
+    @require_api_key
+    def post(self):
+        """Process an Act PDF"""
+        args = act_parser.parse_args()
+        pdf_link = args['pdf_link']
+        acts_page_link = args['acts_page_link']
+        try:
+            logger.info(f"Starting processing for Act PDF: {pdf_link}")
+            result = process_acts(pdf_link, acts_page_link)
+            logger.info(f"Successfully processed Act PDF: {pdf_link}")
+            return {'message': 'Act PDF processed successfully.', 'details': result}, 200
+        except Exception as e:
+            logger.error(f"Error processing Act PDF {pdf_link}: {e}", exc_info=True)
+            api.abort(500, f"An error occurred during processing: {str(e)}")
 
 
-@app.post(
-    "/laws",
-    response_model=ProcessingResponse,
-    summary="Process a Law PDF",
-    description="Accepts a URL to a Law PDF, processes it, and upserts the vectorized content to Pinecone."
-)
-async def create_law_processing_job(payload: LawPayload, _=ProtectedEndpoint):
-    """
-    Processes a Law PDF synchronously. The function will wait until processing is complete.
-    """
-    try:
-        logger.info(f"Starting processing for Law PDF: {payload.pdf_link}")
-        result = process_laws(payload.pdf_link)
-        logger.info(f"Successfully processed Law PDF: {payload.pdf_link}")
-        return {"message": "Law PDF processed successfully.", "details": result}
-    except Exception as e:
-        logger.error(f"Error processing Law PDF {payload.pdf_link}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An error occurred during processing: {str(e)}")
+@ns.route('/laws')
+class LawResource(Resource):
+    @ns.doc('process_law', description="Accepts a URL to a Law PDF, processes it, and upserts the vectorized content.")
+    @ns.expect(law_parser)
+    @ns.marshal_with(processing_response_model)
+    @require_api_key
+    def post(self):
+        """Process a Law PDF"""
+        args = law_parser.parse_args()
+        pdf_link = args['pdf_link']
+        try:
+            logger.info(f"Starting processing for Law PDF: {pdf_link}")
+            result = process_laws(pdf_link)
+            logger.info(f"Successfully processed Law PDF: {pdf_link}")
+            return {'message': 'Law PDF processed successfully.', 'details': result}, 200
+        except Exception as e:
+            logger.error(f"Error processing Law PDF {pdf_link}: {e}", exc_info=True)
+            api.abort(500, f"An error occurred during processing: {str(e)}")
 
 
 # --- 7. Main Execution Block ---
 
 if __name__ == "__main__":
-    # Get port from environment variable (Railway sets this automatically)
+    # Read the port from the environment variable, with a default for local development
     port = int(os.environ.get("PORT", 5000))
-    
-    if os.environ.get("ENVIRONMENT") == "production":
-        # Production: use waitress
-        from waitress import serve
-        serve(app, host="0.0.0.0", port=port)
-    else:
-        # Development: use Flask's built-in server
-        app.run(debug=False, host="0.0.0.0", port=port)
+    # Note: Flask's development server is not for production.
+    # Use a production-ready WSGI server like Gunicorn or Waitress.
+    app.run(host="0.0.0.0", port=port, debug=False)
