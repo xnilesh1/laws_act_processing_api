@@ -1,136 +1,262 @@
 import logging
-import os
-from functools import wraps
-
-from dotenv import load_dotenv
-from flask import Flask, request
-from flask_restx import Api, Resource, reqparse, fields
-from pydantic import Field
-from pydantic_settings import BaseSettings
-from werkzeug.exceptions import Unauthorized, InternalServerError
-
-# Import your existing processing functions
-from acts import process_acts
-from laws_processing import process_laws
-
-# --- 1. Basic Setup ---
-
-# Load environment variables
-load_dotenv()
+import time
+import uvicorn
+from langsmith.run_trees import RunTree
+from fastapi import FastAPI, Depends, HTTPException, status, Header
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from src.processing.main import process_laws, process_acts
+from src.config import API_PASSWORD
+from src.query.chat import ChatRequest, get_chat_session, ChatResponse
+from google.generativeai import types as genai_types
+from google.generativeai import protos
+from src.query.tools import AVAILABLE_TOOLS
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-# --- 2. Centralized Configuration (Same as before) ---
-
-class Settings(BaseSettings):
-    """Manages application-wide settings."""
-    api_password: str = Field(alias="API_PASSWORD")
-
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
-
-settings = Settings()
+# --- FastAPI App Initialization ---
+app = FastAPI(
+    title="Legal Documents API",
+    description="An API for processing legal documents and chatting.",
+    version="1.0.0",
+)
 
 
-# --- 3. Flask & Flask-RESTX Application Initialization ---
-
-app = Flask(__name__)
-api = Api(app,
-          version='1.0',
-          title='PDF Processing API',
-          description='An API to process Act and Law PDF documents from URLs and store them as vector embeddings.',
-          doc='/')  # Serve Swagger UI at the root URL
-
-# Define a namespace for the API endpoints
-ns = api.namespace('processing', description='PDF Processing operations')
+# --- Pydantic Models for Request Bodies ---
+class LawsProcessRequest(BaseModel):
+    pdf_link: str
 
 
-# --- 4. Security / Authentication ---
-
-def require_api_key(f):
-    """Decorator to protect endpoints with an API key."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        api_key = request.headers.get('x-api-password')
-        if not settings.api_password:
-            logger.error("API_PASSWORD environment variable is not set on the server.")
-            raise InternalServerError("Server configuration error.")
-        if not api_key or api_key != settings.api_password:
-            logger.warning("Invalid API password attempt.")
-            raise Unauthorized("Invalid or missing API Password")
-        return f(*args, **kwargs)
-    return decorated
+class ActsProcessRequest(BaseModel):
+    pdf_link: str
+    acts_page_link: str
 
 
-# --- 5. API Request and Response Models ---
-
-# Request parsers for input validation
-act_parser = reqparse.RequestParser()
-act_parser.add_argument('pdf_link', type=str, required=True, help='A direct public URL to the Act PDF file.', location='json')
-act_parser.add_argument('acts_page_link', type=str, required=True, help='The source URL of the page where the PDF was found.', location='json')
-
-law_parser = reqparse.RequestParser()
-law_parser.add_argument('pdf_link', type=str, required=True, help='A direct public URL to the Law PDF file.', location='json')
-
-# Response model for consistent output structure
-processing_response_model = api.model('ProcessingResponse', {
-    'message': fields.String(required=True, description='Status message of the processing job.'),
-    'details': fields.String(required=True, description='Details returned from the processing job.')
-})
+# --- Authentication ---
+async def verify_password(Authorization: str = Header(None)):
+    """FastAPI dependency to verify the password in the Authorization header."""
+    if Authorization != API_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required: Include Authorization header with the correct password.",
+        )
 
 
-# --- 6. API Endpoints ---
+# --- API Endpoints ---
 
-@ns.route('/act')
-class ActResource(Resource):
-    @ns.doc('process_act', description="Accepts a URL to an Act PDF, processes it, and upserts the vectorized content.")
-    @ns.expect(act_parser)
-    @ns.marshal_with(processing_response_model)
-    @require_api_key
-    def post(self):
-        """Process an Act PDF"""
-        args = act_parser.parse_args()
-        pdf_link = args['pdf_link']
-        acts_page_link = args['acts_page_link']
-        try:
-            logger.info(f"Starting processing for Act PDF: {pdf_link}")
-            result = process_acts(pdf_link, acts_page_link)
-            logger.info(f"Successfully processed Act PDF: {pdf_link}")
-            return {'message': 'Act PDF processed successfully.', 'details': result}, 200
-        except Exception as e:
-            logger.error(f"Error processing Act PDF {pdf_link}: {e}", exc_info=True)
-            api.abort(500, f"An error occurred during processing: {str(e)}")
+@app.get('/health')
+def health_check():
+    """Health check endpoint."""
+    return {
+        'status': 'healthy',
+        'message': 'Legal Documents API is running',
+        'timestamp': time.time()
+    }
 
 
-@ns.route('/laws')
-class LawResource(Resource):
-    @ns.doc('process_law', description="Accepts a URL to a Law PDF, processes it, and upserts the vectorized content.")
-    @ns.expect(law_parser)
-    @ns.marshal_with(processing_response_model)
-    @require_api_key
-    def post(self):
-        """Process a Law PDF"""
-        args = law_parser.parse_args()
-        pdf_link = args['pdf_link']
-        try:
-            logger.info(f"Starting processing for Law PDF: {pdf_link}")
-            result = process_laws(pdf_link)
-            logger.info(f"Successfully processed Law PDF: {pdf_link}")
-            return {'message': 'Law PDF processed successfully.', 'details': result}, 200
-        except Exception as e:
-            logger.error(f"Error processing Law PDF {pdf_link}: {e}", exc_info=True)
-            api.abort(500, f"An error occurred during processing: {str(e)}")
+@app.post('/process/laws', dependencies=[Depends(verify_password)])
+def process_laws_endpoint(request_data: LawsProcessRequest):
+    """
+    Process a laws PDF document.
+    """
+    try:
+        pdf_link = request_data.pdf_link
+        logger.info(f"Starting laws processing for: {pdf_link}")
+        start_time = time.time()
+
+        # Process the PDF (this will wait until completion)
+        result = process_laws(pdf_link)
+
+        processing_time = time.time() - start_time
+        logger.info(f"Laws processing completed in {processing_time:.2f} seconds")
+
+        return {
+            'success': True,
+            'message': result,
+            'pdf_link': pdf_link,
+            'processing_time_seconds': round(processing_time, 2)
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing laws PDF: {str(e)}")
+        # Using JSONResponse to set status code for exceptions
+        return JSONResponse(
+            status_code=500,
+            content={
+                'success': False,
+                'error': 'Processing failed',
+                'message': str(e),
+                'pdf_link': request_data.pdf_link if 'request_data' in locals() else None
+            }
+        )
 
 
-# --- 7. Main Execution Block ---
+@app.post('/process/acts', dependencies=[Depends(verify_password)])
+def process_acts_endpoint(request_data: ActsProcessRequest):
+    """
+    Process an acts PDF document.
+    """
+    try:
+        pdf_link = request_data.pdf_link
+        acts_page_link = request_data.acts_page_link
 
-if __name__ == "__main__":
-    # Read the port from the environment variable, with a default for local development
+        logger.info(f"Starting acts processing for: {pdf_link}")
+        start_time = time.time()
 
-    # Note: Flask's development server is not for production.
-    # Use a production-ready WSGI server like Gunicorn or Waitress.
-    app.run(host="0.0.0.0", port=5000, debug=False)
+        # Process the PDF (this will wait until completion)
+        result = process_acts(pdf_link, acts_page_link)
+
+        processing_time = time.time() - start_time
+        logger.info(f"Acts processing completed in {processing_time:.2f} seconds")
+
+        return {
+            'success': True,
+            'message': result,
+            'pdf_link': pdf_link,
+            'acts_page_link': acts_page_link,
+            'processing_time_seconds': round(processing_time, 2)
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing acts PDF: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                'success': False,
+                'error': 'Processing failed',
+                'message': str(e),
+                'pdf_link': request_data.pdf_link if 'request_data' in locals() else None,
+                'acts_page_link': request_data.acts_page_link if 'request_data' in locals() else None
+            }
+        )
+
+
+@app.post('/query/chat', response_model=ChatResponse, dependencies=[Depends(verify_password)])
+async def chat_with_bot(request: ChatRequest):
+    """
+    Handles a chat request with the bot, maintaining session history.
+    """
+    top_p = 3  # Example value, you can adjust as needed
+
+    parent_run = RunTree(
+        name="Chat Session",
+        run_type="chain",
+        inputs={"question": request.question},
+        extra={"metadata": {"session_id": request.session_id}},
+    )
+    total_prompt_tokens = 0
+    total_candidates_tokens = 0
+
+    try:
+        chat = get_chat_session(request.session_id, request.model)
+
+        # Truncate history based on top_p before sending the new message
+        if top_p is not None:
+            if top_p > 0:
+                # A "chat" is a user message and a model response, so 2 history entries.
+                messages_to_keep = top_p * 2
+                if len(chat.history) > messages_to_keep:
+                    chat.history = chat.history[-messages_to_keep:]
+            elif top_p == 0:
+                # Clear history if top_p is 0
+                chat.history = []
+
+        generation_config = genai_types.GenerationConfig(
+            max_output_tokens=request.max_token
+        )
+
+        llm_run = parent_run.create_child(
+            name="Gemini Call",
+            run_type="llm",
+            inputs={"question": request.question, "history_length": len(chat.history)},
+        )
+        response = chat.send_message(
+            request.question,
+            generation_config=generation_config
+        )
+        prompt_tokens = response.usage_metadata.prompt_token_count
+        candidates_tokens = response.usage_metadata.candidates_token_count
+        total_prompt_tokens += prompt_tokens
+        total_candidates_tokens += candidates_tokens
+        llm_run.end(outputs=response, metadata={
+            "prompt_token_count": prompt_tokens,
+            "candidates_token_count": candidates_tokens,
+            "total_token_count": response.usage_metadata.total_token_count
+        })
+
+        # Handle function calls
+        if response.candidates and response.candidates[0].content.parts and any(
+                p.function_call for p in response.candidates[0].content.parts):
+            tool_responses = []
+            tool_run = parent_run.create_child(name="Tool Calling", run_type="tool")
+            for part in response.candidates[0].content.parts:
+                if part.function_call:
+                    function_call = part.function_call
+                    function_name = function_call.name
+                    if function_name in AVAILABLE_TOOLS:
+                        function_to_call = AVAILABLE_TOOLS[function_name]
+                        function_args = dict(function_call.args)
+                        function_response = function_to_call(**function_args)
+
+                        tool_responses.append(protos.Part(
+                            function_response=protos.FunctionResponse(
+                                name=function_name,
+                                response=function_response
+                            )
+                        ))
+            tool_run.end(outputs={"tool_responses": tool_responses})
+
+            if tool_responses:
+                tool_llm_run = parent_run.create_child(
+                    name="Gemini Call with Tools",
+                    run_type="llm",
+                    inputs={"tool_responses": tool_responses},
+                )
+                response = chat.send_message(tool_responses)
+                prompt_tokens_tool = response.usage_metadata.prompt_token_count
+                candidates_tokens_tool = response.usage_metadata.candidates_token_count
+                total_prompt_tokens += prompt_tokens_tool
+                total_candidates_tokens += candidates_tokens_tool
+                tool_llm_run.end(outputs=response, metadata={
+                    "prompt_token_count": prompt_tokens_tool,
+                    "candidates_token_count": candidates_tokens_tool,
+                    "total_token_count": response.usage_metadata.total_token_count
+                })
+
+        final_response = response.text
+
+        # Clean history for future calls by removing tool-related messages
+        clean_history = []
+        for message in chat.history:
+            text_parts = [part for part in message.parts if part.text]
+            if text_parts:
+                clean_message = protos.Content(role=message.role, parts=text_parts)
+                clean_history.append(clean_message)
+
+        chat.history = clean_history
+
+        parent_run.end(outputs={"response": final_response}, metadata={
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_candidates_tokens": total_candidates_tokens,
+            "total_tokens": total_prompt_tokens + total_candidates_tokens,
+        })
+        return ChatResponse(response=final_response)
+
+    except Exception as e:
+        parent_run.end(error=str(e))
+        # Re-raise as HTTPException to be handled by FastAPI
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+    finally:
+        # Ensure the run is always posted
+        parent_run.post()
+
+
+if __name__ == '__main__':
+    uvicorn.run(app,
+                host="0.0.0.0",
+                port=8000)
