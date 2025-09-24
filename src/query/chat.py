@@ -1,10 +1,10 @@
 import os
 import uuid
 from typing import Dict, Any, Optional
-from google import genai
+import google.generativeai as genai
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from google.genai import types as genai_types
+from google.generativeai import types as genai_types
 
 
 
@@ -18,7 +18,7 @@ from src.config import CHAT_MODEL, CHAT_TOP_P
 load_dotenv()
 
 # --- Configuration ---
-client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # --- LangSmith Configuration ---
 os.environ["LANGSMITH_TRACING"] = os.getenv("LANGSMITH_TRACING", "true")
@@ -60,8 +60,8 @@ generation_config = genai_types.GenerationConfig(
     # but we will use the one from request
 )
 
-model = client.models.generate.model(
-    model=CHAT_MODEL,
+model = genai.GenerativeModel(
+    model_name=CHAT_MODEL,  # Using 1.5 flash as it's generally better
     system_instruction=system_prompt,
     tools=legal_tools,
     generation_config=generation_config,
@@ -73,8 +73,8 @@ chat_sessions: Dict[str, Any] = {}
 def get_chat_session(session_id: str, model_name: str = CHAT_MODEL):
     if session_id not in chat_sessions:
         # New session, create model and chat
-        active_model = client.models.generate.model(
-            model=model_name,
+        active_model = genai.GenerativeModel(
+            model_name=model_name,
             system_instruction=system_prompt,
             tools=legal_tools
         )
@@ -86,8 +86,8 @@ def get_chat_session(session_id: str, model_name: str = CHAT_MODEL):
         # Model has changed. Create new chat, history from previous model is lost for this session.
         # We can take the history from old chat and pass to new one.
         old_history = session["chat"].history
-        active_model = client.models.generate.model(
-            model=model_name,
+        active_model = genai.GenerativeModel(
+            model_name=model_name,
             system_instruction=system_prompt,
             tools=legal_tools
         )

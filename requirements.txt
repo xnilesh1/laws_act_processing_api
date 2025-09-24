@@ -54,7 +54,6 @@ openai==1.109.0
 orjson==3.11.3
 packaging==24.2
 pinecone==7.3.0
-pinecone-client==6.0.0
 pinecone-plugin-assistant==1.8.0
 pinecone-plugin-interface==0.0.7
 propcache==0.3.2
@@ -116,7 +115,7 @@ google-api-core==2.25.1
 google-api-python-client==2.183.0
 google-auth==2.40.3
 google-auth-httplib2==0.2.0
-google-genai==1.7.0
+google-generativeai
 googleapis-common-protos==1.70.0
 greenlet==3.2.4
 h11==0.16.0
@@ -150,7 +149,7 @@ openai==1.109.0
 orjson==3.11.3
 packaging==24.2
 pinecone==7.3.0
-pinecone-client==6.0.0
+pinecone
 pinecone-plugin-assistant==1.8.0
 pinecone-plugin-interface==0.0.7
 propcache==0.3.2

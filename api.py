@@ -8,8 +8,8 @@ from pydantic import BaseModel
 from src.processing.main import process_laws, process_acts
 from src.config import API_PASSWORD
 from src.query.chat import ChatRequest, get_chat_session, ChatResponse
-from google.genai import types as genai_types
-from google.genai import protos
+from google.generativeai import types as genai_types
+from google.generativeai import protos
 from src.query.tools import AVAILABLE_TOOLS
 
 # Configure logging
